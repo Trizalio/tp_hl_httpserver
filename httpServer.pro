@@ -21,4 +21,5 @@ SOURCES += main.cpp \
     httplogic.cpp
 
 HEADERS += \
-    httplogic.h
+    httplogic.h \
+    SConfig.h

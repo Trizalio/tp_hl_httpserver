@@ -14,8 +14,8 @@
 #include <unistd.h>
 
 #include "httplogic.h"
+#include "SConfig.h"
 
-#define DEFAULT_PORT 80
 
 void listenerNewConnection_cb(struct evconnlistener *, evutil_socket_t, struct sockaddr *, int socklen, void *);
 void listnerError_cb(struct evconnlistener *, void *);
@@ -24,31 +24,24 @@ void connectionWrite_cb(struct bufferevent *, void *);
 void connectionRead_cb(struct bufferevent *, void *);
 void connectionEvent_cb(struct bufferevent *, short, void *);
 
+#define MIN_PORT_NUMBER_WITHOUT_ROOT_PERMISSIONS 1024
 
-int main(int argc, char *argv[])
+SConfig getConfigFromArgs(int argc, char *argv[])
 {
-    struct event_base* pBase = 0;
-    struct evconnlistener* pListener = 0;
-    struct sockaddr_in Address;
-    int nProcessessAmount = std::thread::hardware_concurrency() - 1;//2;
+    SConfig Config;
 
-    /// init libevent base
-    pBase = event_base_new();
-    if (pBase == 0)
-    {
-        std::cerr << "ERROR: init libevent" << std::endl;
-        return 1;
-    }
+    /// select processes amount based on hardware
+    Config.nProcesses = std::thread::hardware_concurrency() - 1;//2;
+    std::cout << "INFO: selected processes amount " << Config.nProcesses << std::endl;
 
-    /// get specified port
-    unsigned short nPort = DEFAULT_PORT;
     if(argc > 1)
     {
+        /// get specified port from args
         long int nDesiredPort = strtol(argv[1], NULL, 0);
         if(nDesiredPort > 0 && nDesiredPort <= USHRT_MAX)
         {
-            nPort = nDesiredPort;
-            std::cout << "INFO: specified port " << nPort << std::endl;
+            Config.nPort = nDesiredPort;
+            std::cout << "INFO: specified port " << Config.nPort << std::endl;
         }
         else
         {
@@ -61,41 +54,84 @@ int main(int argc, char *argv[])
         std::cout << "INFO: no port specified, 80 will be used" << std::endl;
     }
 
-    /// init address
+    if(Config.nPort < MIN_PORT_NUMBER_WITHOUT_ROOT_PERMISSIONS)
+    {
+        std::cout << "WARNING: ports less then " << MIN_PORT_NUMBER_WITHOUT_ROOT_PERMISSIONS << " require root permissions" << std::endl;
+    }
+    return Config;
+}
+
+void forkServer(unsigned short nPocesses)
+{
+    /// fork
+    pid_t Pid = 0;
+    std::cout << "INFO: parent process id: " << getpid() << std::endl;
+    for(int i = 1; i <= nPocesses; ++i) {
+        Pid = fork();
+        if(Pid == 0) // child process
+        {
+            std::cout << "INFO: child process id: " << getpid() << " started" << std::endl;
+            break;
+        }
+        else if(Pid == -1) // fork error
+        {
+            std::cerr << "ERROR: forking failed" << std::endl;
+            throw std::exception();
+        }
+    }
+}
+
+struct event_base* initBase()
+{
+    struct event_base* pBase = event_base_new();
+    if (pBase == 0)
+    {
+        std::cerr << "ERROR: init libevent base failed" << std::endl;
+        throw std::exception();
+    }
+    return pBase;
+}
+
+struct sockaddr_in initAddress(unsigned short nPort)
+{
+    struct sockaddr_in Address;
     memset(&Address, 0, sizeof(Address));
+
     Address.sin_port = htons(nPort);
     Address.sin_family = AF_INET;
 
-    /// bind port
-    pListener = evconnlistener_new_bind(pBase, listenerNewConnection_cb, NULL,
-        LEV_OPT_REUSEABLE|LEV_OPT_CLOSE_ON_FREE, -1,
-        (struct sockaddr*)&Address, sizeof(Address));
+    return Address;
+}
+
+struct evconnlistener* initListner(struct event_base* pBase, struct sockaddr_in Address)
+{
+    struct evconnlistener* pListener = pListener = evconnlistener_new_bind(
+                pBase,
+                listenerNewConnection_cb,
+                NULL,
+                LEV_OPT_REUSEABLE|LEV_OPT_CLOSE_ON_FREE,
+                -1,
+                (struct sockaddr*)&Address,
+                sizeof(Address));
     if (pListener == 0)
     {
-        std::cerr << "ERROR: creating a listener, Check if port " << nPort << " is not used by another process" << std::endl;
-        return 1;
+        std::cerr << "ERROR: aquiring port failed" << std::endl;
+        throw std::exception();
     }
 
     /// bind error callback
     evconnlistener_set_error_cb(pListener, listnerError_cb);
 
-    /// fork
-    pid_t Pid;
-    std::cout << "parent process " << getpid() << std::endl;
-    for(int i = 1; i <= nProcessessAmount; ++i) {
-        Pid = fork();
-        if(Pid == 0)
-        {
-            std::cout << "fork " << getpid() << " started" << std::endl;
-            break;
-        }
-        else if(Pid == -1)
-        {
-            std::cerr << "ERROR: forking\n" << std::endl;
-            break;
-        }
+    return pListener;
+}
 
-    }
+short startForkServer(SConfig Config)
+{
+    struct event_base* pBase = initBase();
+    struct sockaddr_in Address = initAddress(Config.nPort);
+    struct evconnlistener* pListener = initListner(pBase, Address);
+
+    forkServer(Config.nProcesses);
 
     /// reinit is required after forking
     event_reinit(pBase);
@@ -108,6 +144,21 @@ int main(int argc, char *argv[])
     event_base_free(pBase);
 
     std::cout << "exit" << std::endl;
+    return 0;
+}
+
+int main(int argc, char* argv[])
+{
+    SConfig Config = getConfigFromArgs(argc, argv);
+    try
+    {
+        startForkServer(Config);
+    }
+    catch(...)
+    {
+        return 1;
+    }
+
     return 0;
 }
 
